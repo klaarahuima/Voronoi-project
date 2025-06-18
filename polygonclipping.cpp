@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <algorithm>
 #include <list>
+#include "lbfgs.c"
+#include <cassert>
+#include <chrono>
 
 double sqr(double x) {return x*x;};
 
@@ -69,16 +72,20 @@ public:
         double s = 0;
         for (int i = 0; i < vertices.size(); i++) {
             int ip = (i==vertices.size()-1) ? 0 : (i+1);
-            s += std::abs(vertices[i][0]*vertices[ip][1] - vertices[ip][0] * vertices[i][1]);
+            s += vertices[i][0]*vertices[ip][1] - vertices[ip][0] * vertices[i][1];
 
         }
-        return s / 2;
+        s = std::abs(s) / 2.0;
+        return s ;
     }
 
     double integral_sqr_dist(const Vector& Pi) {
         // decompose polygon into triangles
         // n-2 triangles if n is number of vertices
         double s = 0;
+        if (vertices.size() < 3) {
+            return 0;
+        }
         for (int t = 1;t < vertices.size()-2; t++) {
             Vector c[3] = {vertices[0], vertices[t], vertices[t+1]}; // triangle with 3 vertices
             // structure holds for every t : will define n-2 triangles that split the polygon exactly
@@ -90,7 +97,7 @@ public:
 
                 }
             }
-            double areaT = (c[1][0]-c[0][0])*(c[2][1]-c[0][1]) - (c[1][1]-c[0][1])*(c[2][0]-c[0][0]);
+            double areaT = 0.5*std::abs((c[1][0]-c[0][0])*(c[2][1]-c[0][1]) - (c[1][1]-c[0][1])*(c[2][0]-c[0][0]));
             s += integralT * areaT / 6.0;
 
         }
@@ -104,7 +111,7 @@ class Voronoi {
     Voronoi() {};
 
     // returns a clipped polygon
-    Polygon clip_by_bisector(const Polygon& V, const Vector& P0, const Vector& Pi) {
+    Polygon clip_by_bisector(const Polygon& V, const Vector& P0, const Vector& Pi, double w0, double wi) {
         Polygon  result;
         for (int i = 0; i<V.vertices.size(); i++) {
 
@@ -112,17 +119,27 @@ class Voronoi {
             const Vector &A = V.vertices[(i == 0)? V.vertices.size()-1:i-1]; // previous vertex
             const Vector &B = V.vertices[i];
 
-            bool A_inside = (A - P0).norm2() <= (A - Pi).norm2();
-            bool B_inside = (B - P0).norm2() <= (B - Pi).norm2();
+            bool A_inside = (A - P0).norm2() -w0 <= (A - Pi).norm2() -wi;
+            bool B_inside = (B - P0).norm2() -w0 <= (B - Pi).norm2() -wi;
+
+        
+            Vector v = Pi - P0;
+            Vector M = (P0 + Pi) / 2 + ((w0 - wi) / (2 * v.norm2())) * v; // from lecture notes
+            
 
             if (B_inside) { // algorithm in lecture notes, defined by P0 and Pi
 
                 if (!A_inside) {
 
-                    Vector M = (P0 + Pi) * 0.5;
-                    double t = dot(M-A, Pi - P0) / dot(B-A, Pi - P0);
+                    // unweighted version
+                    //Vector M = (P0 + Pi) * 0.5;
+                    //double t = dot(M-A, Pi - P0) / dot(B-A, Pi - P0);
+                    //Vector P = A + t*(B-A);
+                   
+                    double t = dot(M - A, v)/dot(B - A, v);
                     Vector P = A + t*(B-A);
                     result.vertices.push_back(P); // P defined as in lecture
+                
                 }
             
                 result.vertices.push_back(B);
@@ -131,10 +148,15 @@ class Voronoi {
 
                 if (A_inside) {
 
-                    Vector M = (P0 + Pi) * 0.5;
-                    double t = dot(M-A, Pi - P0) / dot(B-A, Pi - P0);
+                    // unweighted version
+                    //Vector M = (P0 + Pi) * 0.5;
+                    //double t = dot(M-A, Pi - P0) / dot(B-A, Pi - P0);
+                    //Vector P = A + t*(B-A);
+                    
+                    double t = dot(M - A, v)/dot(B - A, v);
                     Vector P = A + t*(B-A);
                     result.vertices.push_back(P);
+        
                 }
             }
 
@@ -150,8 +172,7 @@ class Voronoi {
         square.vertices.push_back(Vector(1, 1));
         square.vertices.push_back(Vector(0, 1));
 
-        cells.resize(points.size());
-        //diagram.resize(points.size());
+        cells.resize(points.size());        
 
         for (int i = 0; i < points.size(); i++) {
 
@@ -160,7 +181,10 @@ class Voronoi {
             for (int j = 0; j < points.size(); j++) {
                 if (i == j) continue;
 
-                V = clip_by_bisector(V, points[i], points[j]);
+                double w0 = weights[i];
+                double wi = weights[j];
+
+                V = clip_by_bisector(V, points[i], points[j], w0, wi);
 
             }
             cells[i] = V;
@@ -168,6 +192,7 @@ class Voronoi {
     }
     std::vector<Vector> points;
     std::vector<Polygon> cells;
+    std::vector<double> weights;
 
 };
  
@@ -175,6 +200,7 @@ class Voronoi {
 void save_svg(const std::vector<Polygon> &polygons, const std::vector<Vector> &seeds, std::string filename, std::string fillcol = "none") {
         FILE* f = fopen(filename.c_str(), "w+"); 
         fprintf(f, "<svg xmlns = \"http://www.w3.org/2000/svg\" width = \"1000\" height = \"1000\">\n");
+
         for (int i=0; i<polygons.size(); i++) {
             fprintf(f, "<g>\n");
             fprintf(f, "<polygon points = \""); 
@@ -242,23 +268,111 @@ void save_svg_animated(const std::vector<Polygon> &polygons, std::string filenam
         fclose(f);
     }
 
+static lbfgsfloatval_t evaluate(void* , const lbfgsfloatval_t*, lbfgsfloatval_t*, const int, const lbfgsfloatval_t);
+
+class OptimalTransport {
+    public:
+    OptimalTransport(){};
+
+    void optimize() {
+
+        // This code is from the lecture
+
+        int N = vor.weights.size();
+        lbfgsfloatval_t fx;
+        std::vector<double> weights(N, 0);
+        memcpy(&weights[0], &vor.weights[0], N*sizeof(weights[0]));
+        assert(vor.weights.size() == N);
+
+        lbfgs_parameter_t param;
+        lbfgs_parameter_init(&param);
+
+        int ret = lbfgs(N, &weights[0], &fx, evaluate, NULL, (void*)this, &param);
+        std::cout << "L-BFGS terminated with status " << ret << std::endl;
+
+        memcpy(&vor.weights[0], &weights[0], N*sizeof(weights[0]));
+        vor.compute();
+    }
+
+    Voronoi vor;
+};
+
+static lbfgsfloatval_t evaluate(
+        void *instance,
+        const lbfgsfloatval_t *x,
+        lbfgsfloatval_t *g,
+        const int n,
+        const lbfgsfloatval_t step
+        )
+    {
+        // This code is from the lecture
+        OptimalTransport* ot = (OptimalTransport*)(instance);
+
+        int N = ot->vor.weights.size();
+        memcpy(&ot->vor.weights[0], x, N*sizeof(x[0]));
+        ot->vor.compute();
+
+        // Define target areas below
+
+        std::vector<Vector> sites = ot->vor.points;
+        std::vector<double> target_areas(sites.size());
+
+        Vector center(0.5, 0.5, 0.);
+        double variance = 0.08;
+        double tot = 0.;
+
+        // computing target areas as shown in lecture notes
+        for (int i = 0; i < sites.size(); i++) {
+            Vector dist = sites[i] - center;
+            double tmp = dist.norm2();
+            target_areas[i] = std::exp(-tmp / variance);
+            tot += target_areas[i];
+        }
+
+        // normalizing target areas
+        for (int i = 0; i < sites.size(); i++) {
+            target_areas[i] = target_areas[i] / tot;
+        }
+
+        int i;
+        lbfgsfloatval_t fx = 0.;
+        for (int i = 0; i < n; i++){ 
+                double current_area = ot->vor.cells[i].area();
+                g[i] = -(target_areas[i] - current_area);
+                fx += ot->vor.cells[i].integral_sqr_dist(ot->vor.points[i]) - x[i]*(current_area - target_areas[i]);
+                //std::cout << "Cell " << i << ": Area = " << current_area << ", Target = " << 1./n << ", Gradient = " << g[i] << std::endl;
+        }
+        return -fx;
+    }
+
 
 int main() {
+
     int N = 1000;
+    Voronoi vor;
 
-    Voronoi Vor;
     for (int i = 0; i < N; i++) { // creating random points
-        Vor.points.push_back(Vector(uniform(engine), uniform(engine), 0.0));
-        //Vor.weights.push_back(1+0.01*uniform(engine));
-
+        vor.points.push_back(Vector(uniform(engine), uniform(engine), 0.0));
+        vor.weights.push_back(0.);
     }
-    Vor.compute();
 
-    // week 7 below
-    //OptimalTransport ot;
-    //ot.vor = Vor;
+    vor.compute();
+    save_svg(vor.cells, vor.points, "test.svg", "none");
+   
+    std::cout << "OPTIMAL TRANSPORT NOW ------------------------------------" << std::endl;
+    
+    auto start = std::chrono::high_resolution_clock::now();
 
-    save_svg(Vor.cells, Vor.points, "voronoi.svg", "none");
+    OptimalTransport ot;
+    ot.vor = vor;
+    ot.optimize();
+
+    save_svg(ot.vor.cells, ot.vor.points, "voronoi.svg", "none");
+
+
+    auto end2 = std::chrono::high_resolution_clock::now();
+    auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end2 - start);
+    std::cout << "Elapsed time: " << duration2.count() << " ms\n";
 
     return 0;
 
